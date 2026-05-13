@@ -679,6 +679,7 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "handset-controller",
  "static_cell",
 ]
 
@@ -938,6 +939,10 @@ dependencies = [
  "typenum",
  "version_check",
 ]
+
+[[package]]
+name = "handset-controller"
+version = "0.1.0"
 
 [[package]]
 name = "hash32"

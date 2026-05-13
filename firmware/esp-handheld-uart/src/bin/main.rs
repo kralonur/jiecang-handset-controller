@@ -16,6 +16,10 @@ use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartTx};
 use esp_println as _;
+use handset_controller::{
+    Button, ButtonEvent, ButtonLines, ButtonReading, Controller, DisplayCommand, HandsetError,
+    ProgramCommand,
+};
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -70,8 +74,10 @@ async fn main(spawner: Spawner) -> ! {
         pin4: handset_pin4,
         pin5: handset_pin5,
     };
-    let mut previous_button_state = button_inputs.read();
-    log_button_state(previous_button_state);
+
+    let mut controller = Controller::default();
+    let mut previous_button_reading = controller.button_reading(button_inputs.lines());
+    log_button_reading(previous_button_reading);
 
     let mut handset_tx = UartTx::new(
         peripherals.UART1,
@@ -85,57 +91,56 @@ async fn main(spawner: Spawner) -> ! {
     let mut save_armed = false;
     let mut reset_refreshes_remaining = RESET_REFRESH_TICKS;
     let mut held_adjust_ticks = 0u8;
-    let mut current_command = HandsetCommand::Reset;
+    let mut current_command = DisplayCommand::Reset;
     log_display_command(current_command);
 
     loop {
-        let current_packet = current_command.packet();
+        let current_packet = controller.command(current_command);
         let mut written = 0;
         while written < current_packet.len() {
             written += handset_tx.write(&current_packet[written..]).unwrap_or(0);
         }
         handset_tx.flush().ok();
 
-        let button_state = button_inputs.read();
-        if button_state != previous_button_state {
-            log_button_state(button_state);
+        let button_lines = button_inputs.lines();
+        let button_reading = controller.button_reading(button_lines);
+        if button_reading != previous_button_reading {
+            log_button_reading(button_reading);
         }
 
         if reset_refreshes_remaining > 0 {
             reset_refreshes_remaining -= 1;
 
             if reset_refreshes_remaining == 0 {
-                current_command = HandsetCommand::Height(current_height_mm);
+                current_command = DisplayCommand::Height(current_height_mm);
                 log_display_command(current_command);
             }
-        } else if button_state.button != previous_button_state.button {
-            held_adjust_ticks = 0;
-
-            if button_state.button != HandsetButton::None {
+        } else if let Some(button_event) = controller.update_buttons(button_lines) {
+            if let ButtonEvent::Pressed(button) = button_event {
+                held_adjust_ticks = 0;
                 handle_button_press(
-                    button_state.button,
+                    button,
                     &mut current_height_mm,
                     &mut memories,
                     &mut save_armed,
                     &mut current_command,
                 );
             }
-        } else if matches!(button_state.button, HandsetButton::Up | HandsetButton::Down) {
+        } else if matches!(
+            button_reading,
+            ButtonReading::Button(Button::Up | Button::Down)
+        ) {
             held_adjust_ticks += 1;
 
             if held_adjust_ticks >= HELD_ADJUST_TICKS {
                 held_adjust_ticks = 0;
-                adjust_height(
-                    button_state.button,
-                    &mut current_height_mm,
-                    &mut current_command,
-                );
+                adjust_height(button_reading, &mut current_height_mm, &mut current_command);
             }
         } else {
             held_adjust_ticks = 0;
         }
 
-        previous_button_state = button_state;
+        previous_button_reading = button_reading;
 
         Timer::after(Duration::from_millis(50)).await;
     }
@@ -159,70 +164,12 @@ struct HandsetButtonInputs<'d> {
 }
 
 impl HandsetButtonInputs<'_> {
-    fn read(&self) -> HandsetButtonState {
-        let mut low_mask = 0u8;
-
-        if self.pin2.is_low() {
-            low_mask |= 0b0001;
-        }
-        if self.pin3.is_low() {
-            low_mask |= 0b0010;
-        }
-        if self.pin4.is_low() {
-            low_mask |= 0b0100;
-        }
-        if self.pin5.is_low() {
-            low_mask |= 0b1000;
-        }
-
-        HandsetButtonState {
-            low_mask,
-            button: HandsetButton::decode(low_mask),
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct HandsetButtonState {
-    low_mask: u8,
-    button: HandsetButton,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HandsetButton {
-    None,
-    Up,
-    Down,
-    M1,
-    M2,
-    M3,
-    M4,
-    Rec,
-    Unknown,
-}
-
-impl HandsetButton {
-    fn decode(low_mask: u8) -> Self {
-        match low_mask {
-            0b0000 => Self::None,
-            0b1000 => Self::Up,
-            0b0100 => Self::Down,
-            0b1100 => Self::M1,
-            0b0010 => Self::M2,
-            0b0110 => Self::M3,
-            0b1010 => Self::M4,
-            0b0001 => Self::Rec,
-            _ => Self::Unknown,
-        }
-    }
-
-    fn memory_slot(self) -> Option<MemorySlot> {
-        match self {
-            Self::M1 => Some(MemorySlot::M1),
-            Self::M2 => Some(MemorySlot::M2),
-            Self::M3 => Some(MemorySlot::M3),
-            Self::M4 => Some(MemorySlot::M4),
-            _ => None,
+    fn lines(&self) -> ButtonLines {
+        ButtonLines {
+            pin2_low: self.pin2.is_low(),
+            pin3_low: self.pin3.is_low(),
+            pin4_low: self.pin4.is_low(),
+            pin5_low: self.pin5.is_low(),
         }
     }
 }
@@ -236,6 +183,16 @@ enum MemorySlot {
 }
 
 impl MemorySlot {
+    fn from_button(button: Button) -> Option<Self> {
+        match button {
+            Button::M1 => Some(Self::M1),
+            Button::M2 => Some(Self::M2),
+            Button::M3 => Some(Self::M3),
+            Button::M4 => Some(Self::M4),
+            Button::Up | Button::Down | Button::Rec => None,
+        }
+    }
+
     fn index(self) -> usize {
         match self {
             Self::M1 => 0,
@@ -264,115 +221,48 @@ impl MemorySlot {
     }
 }
 
-#[derive(Clone, Copy)]
-enum HandsetCommand {
-    Reset,
-    Height(u16),
-    Error(HandsetError),
-    Program(ProgramCommand),
-}
-
-impl HandsetCommand {
-    fn packet(self) -> [u8; 4] {
-        match self {
-            Self::Reset => [0x01, 0x04, 0x01, 0xaa],
-            Self::Height(height_mm) => {
-                let [hi, lo] = height_mm.to_be_bytes();
-                [0x01, 0x01, hi, lo]
-            }
-            Self::Error(error) => [0x01, 0x02, error.arg0(), 0x00],
-            Self::Program(program) => [0x01, 0x06, program.arg0(), 0x00],
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum HandsetError {
-    E01,
-    E02,
-    E03,
-    E04,
-}
-
-impl HandsetError {
-    fn arg0(self) -> u8 {
-        match self {
-            Self::E01 => 0x01,
-            Self::E02 => 0x02,
-            Self::E03 => 0x04,
-            Self::E04 => 0x08,
-        }
-    }
-
-    fn code(self) -> u8 {
-        match self {
-            Self::E01 => 1,
-            Self::E02 => 2,
-            Self::E03 => 3,
-            Self::E04 => 4,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ProgramCommand {
-    Pending,
-    Preset1,
-    Preset2,
-    Preset3,
-    Preset4,
-}
-
-impl ProgramCommand {
-    fn arg0(self) -> u8 {
-        match self {
-            Self::Pending => 0x00,
-            Self::Preset1 => 0x01,
-            Self::Preset2 => 0x02,
-            Self::Preset3 => 0x04,
-            Self::Preset4 => 0x08,
-        }
-    }
-}
-
 fn handle_button_press(
-    button: HandsetButton,
+    button: Button,
     current_height_mm: &mut u16,
     memories: &mut [Option<u16>; MEMORY_SLOT_COUNT],
     save_armed: &mut bool,
-    current_command: &mut HandsetCommand,
+    current_command: &mut DisplayCommand,
 ) {
     match button {
-        HandsetButton::Up | HandsetButton::Down => {
-            adjust_height(button, current_height_mm, current_command);
+        Button::Up | Button::Down => {
+            adjust_height(
+                ButtonReading::Button(button),
+                current_height_mm,
+                current_command,
+            );
         }
-        HandsetButton::Rec => {
+        Button::Rec => {
             *save_armed = !*save_armed;
             if *save_armed {
-                *current_command = HandsetCommand::Program(ProgramCommand::Pending);
+                *current_command = DisplayCommand::Program(ProgramCommand::Pending);
             } else {
-                *current_command = HandsetCommand::Height(*current_height_mm);
+                *current_command = DisplayCommand::Height(*current_height_mm);
             }
             log_save_armed(*save_armed);
             log_display_command(*current_command);
         }
-        _ => {
-            if let Some(slot) = button.memory_slot() {
+        Button::M1 | Button::M2 | Button::M3 | Button::M4 => {
+            if let Some(slot) = MemorySlot::from_button(button) {
                 let slot_index = slot.index();
 
                 if *save_armed {
                     memories[slot_index] = Some(*current_height_mm);
                     *save_armed = false;
-                    *current_command = HandsetCommand::Program(slot.program_command());
+                    *current_command = DisplayCommand::Program(slot.program_command());
                     log_memory_saved(slot, *current_height_mm);
                     log_display_command(*current_command);
                 } else if let Some(saved_height_mm) = memories[slot_index] {
                     *current_height_mm = saved_height_mm;
-                    *current_command = HandsetCommand::Height(*current_height_mm);
+                    *current_command = DisplayCommand::Height(*current_height_mm);
                     log_memory_recalled(slot, *current_height_mm);
                     log_display_command(*current_command);
                 } else {
-                    *current_command = HandsetCommand::Error(slot.empty_error());
+                    *current_command = DisplayCommand::Error(slot.empty_error());
                     log_memory_empty(slot);
                     log_display_command(*current_command);
                 }
@@ -382,19 +272,21 @@ fn handle_button_press(
 }
 
 fn adjust_height(
-    button: HandsetButton,
+    button_reading: ButtonReading,
     current_height_mm: &mut u16,
-    current_command: &mut HandsetCommand,
+    current_command: &mut DisplayCommand,
 ) {
-    let next_height_mm = match button {
-        HandsetButton::Up => increase_height(*current_height_mm),
-        HandsetButton::Down => decrease_height(*current_height_mm),
-        _ => *current_height_mm,
+    let next_height_mm = match button_reading {
+        ButtonReading::Button(Button::Up) => increase_height(*current_height_mm),
+        ButtonReading::Button(Button::Down) => decrease_height(*current_height_mm),
+        ButtonReading::None
+        | ButtonReading::Button(Button::M1 | Button::M2 | Button::M3 | Button::M4 | Button::Rec)
+        | ButtonReading::Unknown(_) => *current_height_mm,
     };
 
     if next_height_mm != *current_height_mm {
         *current_height_mm = next_height_mm;
-        *current_command = HandsetCommand::Height(*current_height_mm);
+        *current_command = DisplayCommand::Height(*current_height_mm);
         log_display_command(*current_command);
     }
 }
@@ -415,23 +307,23 @@ fn decrease_height(height_mm: u16) -> u16 {
     }
 }
 
-fn log_display_command(command: HandsetCommand) {
+fn log_display_command(command: DisplayCommand) {
     let packet = command.packet();
 
     match command {
-        HandsetCommand::Reset => {
+        DisplayCommand::Reset => {
             info!(
                 "display reset packet={:02x} {:02x} {:02x} {:02x}",
                 packet[0], packet[1], packet[2], packet[3]
             );
         }
-        HandsetCommand::Height(height_mm) => {
+        DisplayCommand::Height(height_mm) => {
             info!(
                 "display height={} packet={:02x} {:02x} {:02x} {:02x}",
                 height_mm, packet[0], packet[1], packet[2], packet[3]
             );
         }
-        HandsetCommand::Error(error) => {
+        DisplayCommand::Error(error) => {
             info!(
                 "display error=E{} packet={:02x} {:02x} {:02x} {:02x}",
                 error.code(),
@@ -441,7 +333,7 @@ fn log_display_command(command: HandsetCommand) {
                 packet[3]
             );
         }
-        HandsetCommand::Program(program) => {
+        DisplayCommand::Program(program) => {
             info!(
                 "display program arg0=0x{:02x} packet={:02x} {:02x} {:02x} {:02x}",
                 program.arg0(),
@@ -454,34 +346,34 @@ fn log_display_command(command: HandsetCommand) {
     }
 }
 
-fn log_button_state(state: HandsetButtonState) {
-    match state.button {
-        HandsetButton::None => {
-            info!("buttons none raw_low_mask=0b{:04b}", state.low_mask);
+fn log_button_reading(reading: ButtonReading) {
+    match reading {
+        ButtonReading::None => {
+            info!("buttons none");
         }
-        HandsetButton::Up => {
-            info!("button UP raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Button(Button::Up) => {
+            info!("button UP");
         }
-        HandsetButton::Down => {
-            info!("button DOWN raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Button(Button::Down) => {
+            info!("button DOWN");
         }
-        HandsetButton::M1 => {
-            info!("button M1 raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Button(Button::M1) => {
+            info!("button M1");
         }
-        HandsetButton::M2 => {
-            info!("button M2 raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Button(Button::M2) => {
+            info!("button M2");
         }
-        HandsetButton::M3 => {
-            info!("button M3 raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Button(Button::M3) => {
+            info!("button M3");
         }
-        HandsetButton::M4 => {
-            info!("button M4 raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Button(Button::M4) => {
+            info!("button M4");
         }
-        HandsetButton::Rec => {
-            info!("button REC raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Button(Button::Rec) => {
+            info!("button REC");
         }
-        HandsetButton::Unknown => {
-            info!("button unknown raw_low_mask=0b{:04b}", state.low_mask);
+        ButtonReading::Unknown(raw_low_mask) => {
+            info!("button unknown raw_low_mask=0b{:04b}", raw_low_mask);
         }
     }
 }
