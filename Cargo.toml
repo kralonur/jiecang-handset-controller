@@ -1,7 +1,14 @@
+[package]
+edition      = "2024"
+name         = "jiecang-handset-controller"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[dependencies]
+
 [workspace]
 members = [
-  "crates/jiecang-handset-controller",
-  "firmware/esp-handheld-uart",
+  "examples/esp-handheld-uart",
 ]
 resolver = "3"
 

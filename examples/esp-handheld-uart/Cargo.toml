@@ -9,7 +9,7 @@ name = "esp-handheld-uart"
 path = "./src/bin/main.rs"
 
 [dependencies]
-jiecang-handset-controller = { path = "../../crates/jiecang-handset-controller" }
+jiecang-handset-controller = { path = "../.." }
 
 esp-hal = { version = "~1.1.0", features = ["defmt", "esp32c6", "unstable"] }
 

@@ -1,7 +1,0 @@
-[package]
-edition      = "2024"
-name         = "jiecang-handset-controller"
-rust-version = "1.88"
-version      = "0.1.0"
-
-[dependencies]
