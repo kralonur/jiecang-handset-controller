@@ -80,13 +80,16 @@ async fn main(spawner: Spawner) -> ! {
     .expect("failed to configure UART1")
     .with_tx(peripherals.GPIO16);
 
-    let mut test_step = 0u16;
-    let mut refresh_count = 0u32;
-    let mut current_command = test_command(test_step);
-    let mut current_packet = current_command.packet();
-    log_test_step(current_command, current_packet);
+    let mut current_height_mm = START_HEIGHT_MM;
+    let mut memories = [None; MEMORY_SLOT_COUNT];
+    let mut save_armed = false;
+    let mut reset_refreshes_remaining = RESET_REFRESH_TICKS;
+    let mut held_adjust_ticks = 0u8;
+    let mut current_command = HandsetCommand::Reset;
+    log_display_command(current_command);
 
     loop {
+        let current_packet = current_command.packet();
         let mut written = 0;
         while written < current_packet.len() {
             written += handset_tx.write(&current_packet[written..]).unwrap_or(0);
@@ -96,17 +99,43 @@ async fn main(spawner: Spawner) -> ! {
         let button_state = button_inputs.read();
         if button_state != previous_button_state {
             log_button_state(button_state);
-            previous_button_state = button_state;
         }
 
-        refresh_count += 1;
-        if refresh_count >= 20 {
-            refresh_count = 0;
-            test_step = (test_step + 1) % TEST_STEP_COUNT;
-            current_command = test_command(test_step);
-            current_packet = current_command.packet();
-            log_test_step(current_command, current_packet);
+        if reset_refreshes_remaining > 0 {
+            reset_refreshes_remaining -= 1;
+
+            if reset_refreshes_remaining == 0 {
+                current_command = HandsetCommand::Height(current_height_mm);
+                log_display_command(current_command);
+            }
+        } else if button_state.button != previous_button_state.button {
+            held_adjust_ticks = 0;
+
+            if button_state.button != HandsetButton::None {
+                handle_button_press(
+                    button_state.button,
+                    &mut current_height_mm,
+                    &mut memories,
+                    &mut save_armed,
+                    &mut current_command,
+                );
+            }
+        } else if matches!(button_state.button, HandsetButton::Up | HandsetButton::Down) {
+            held_adjust_ticks += 1;
+
+            if held_adjust_ticks >= HELD_ADJUST_TICKS {
+                held_adjust_ticks = 0;
+                adjust_height(
+                    button_state.button,
+                    &mut current_height_mm,
+                    &mut current_command,
+                );
+            }
+        } else {
+            held_adjust_ticks = 0;
         }
+
+        previous_button_state = button_state;
 
         Timer::after(Duration::from_millis(50)).await;
     }
@@ -114,10 +143,13 @@ async fn main(spawner: Spawner) -> ! {
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }
 
-const ERROR_STEP_COUNT: u16 = 8;
-const PROGRAM_STEP_COUNT: u16 = 5;
-const HEIGHT_STEP_COUNT: u16 = 30;
-const TEST_STEP_COUNT: u16 = 1 + ERROR_STEP_COUNT + PROGRAM_STEP_COUNT + HEIGHT_STEP_COUNT;
+const START_HEIGHT_MM: u16 = 700;
+const MIN_HEIGHT_MM: u16 = 600;
+const MAX_HEIGHT_MM: u16 = 1300;
+const HEIGHT_STEP_MM: u16 = 10;
+const MEMORY_SLOT_COUNT: usize = 4;
+const RESET_REFRESH_TICKS: u16 = 20;
+const HELD_ADJUST_TICKS: u8 = 4;
 
 struct HandsetButtonInputs<'d> {
     pin2: Input<'d>,
@@ -183,6 +215,53 @@ impl HandsetButton {
             _ => Self::Unknown,
         }
     }
+
+    fn memory_slot(self) -> Option<MemorySlot> {
+        match self {
+            Self::M1 => Some(MemorySlot::M1),
+            Self::M2 => Some(MemorySlot::M2),
+            Self::M3 => Some(MemorySlot::M3),
+            Self::M4 => Some(MemorySlot::M4),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MemorySlot {
+    M1,
+    M2,
+    M3,
+    M4,
+}
+
+impl MemorySlot {
+    fn index(self) -> usize {
+        match self {
+            Self::M1 => 0,
+            Self::M2 => 1,
+            Self::M3 => 2,
+            Self::M4 => 3,
+        }
+    }
+
+    fn program_command(self) -> ProgramCommand {
+        match self {
+            Self::M1 => ProgramCommand::Preset1,
+            Self::M2 => ProgramCommand::Preset2,
+            Self::M3 => ProgramCommand::Preset3,
+            Self::M4 => ProgramCommand::Preset4,
+        }
+    }
+
+    fn empty_error(self) -> HandsetError {
+        match self {
+            Self::M1 => HandsetError::E01,
+            Self::M2 => HandsetError::E02,
+            Self::M3 => HandsetError::E03,
+            Self::M4 => HandsetError::E04,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -208,6 +287,34 @@ impl HandsetCommand {
 }
 
 #[derive(Clone, Copy)]
+enum HandsetError {
+    E01,
+    E02,
+    E03,
+    E04,
+}
+
+impl HandsetError {
+    fn arg0(self) -> u8 {
+        match self {
+            Self::E01 => 0x01,
+            Self::E02 => 0x02,
+            Self::E03 => 0x04,
+            Self::E04 => 0x08,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::E01 => 1,
+            Self::E02 => 2,
+            Self::E03 => 3,
+            Self::E04 => 4,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum ProgramCommand {
     Pending,
     Preset1,
@@ -219,106 +326,114 @@ enum ProgramCommand {
 impl ProgramCommand {
     fn arg0(self) -> u8 {
         match self {
-            Self::Pending => 0x00, // 01 06 00 00
-            Self::Preset1 => 0x01, // 01 06 01 00
-            Self::Preset2 => 0x02, // 01 06 02 00
-            Self::Preset3 => 0x04, // 01 06 04 00
-            Self::Preset4 => 0x08, // 01 06 08 00
+            Self::Pending => 0x00,
+            Self::Preset1 => 0x01,
+            Self::Preset2 => 0x02,
+            Self::Preset3 => 0x04,
+            Self::Preset4 => 0x08,
         }
     }
 }
 
-#[derive(Clone, Copy)]
-enum HandsetError {
-    E01,
-    E02,
-    E03,
-    E04,
-    E05,
-    E06,
-    E07,
-    E08,
-}
+fn handle_button_press(
+    button: HandsetButton,
+    current_height_mm: &mut u16,
+    memories: &mut [Option<u16>; MEMORY_SLOT_COUNT],
+    save_armed: &mut bool,
+    current_command: &mut HandsetCommand,
+) {
+    match button {
+        HandsetButton::Up | HandsetButton::Down => {
+            adjust_height(button, current_height_mm, current_command);
+        }
+        HandsetButton::Rec => {
+            *save_armed = !*save_armed;
+            if *save_armed {
+                *current_command = HandsetCommand::Program(ProgramCommand::Pending);
+            } else {
+                *current_command = HandsetCommand::Height(*current_height_mm);
+            }
+            log_save_armed(*save_armed);
+            log_display_command(*current_command);
+        }
+        _ => {
+            if let Some(slot) = button.memory_slot() {
+                let slot_index = slot.index();
 
-impl HandsetError {
-    fn arg0(self) -> u8 {
-        match self {
-            Self::E01 => 0x01,
-            Self::E02 => 0x02,
-            Self::E03 => 0x04,
-            Self::E04 => 0x08,
-            Self::E05 => 0x10,
-            Self::E06 => 0x20,
-            Self::E07 => 0x40,
-            Self::E08 => 0x80,
+                if *save_armed {
+                    memories[slot_index] = Some(*current_height_mm);
+                    *save_armed = false;
+                    *current_command = HandsetCommand::Program(slot.program_command());
+                    log_memory_saved(slot, *current_height_mm);
+                    log_display_command(*current_command);
+                } else if let Some(saved_height_mm) = memories[slot_index] {
+                    *current_height_mm = saved_height_mm;
+                    *current_command = HandsetCommand::Height(*current_height_mm);
+                    log_memory_recalled(slot, *current_height_mm);
+                    log_display_command(*current_command);
+                } else {
+                    *current_command = HandsetCommand::Error(slot.empty_error());
+                    log_memory_empty(slot);
+                    log_display_command(*current_command);
+                }
+            }
         }
     }
+}
 
-    fn code(self) -> u8 {
-        match self {
-            Self::E01 => 1,
-            Self::E02 => 2,
-            Self::E03 => 3,
-            Self::E04 => 4,
-            Self::E05 => 5,
-            Self::E06 => 6,
-            Self::E07 => 7,
-            Self::E08 => 8,
-        }
+fn adjust_height(
+    button: HandsetButton,
+    current_height_mm: &mut u16,
+    current_command: &mut HandsetCommand,
+) {
+    let next_height_mm = match button {
+        HandsetButton::Up => increase_height(*current_height_mm),
+        HandsetButton::Down => decrease_height(*current_height_mm),
+        _ => *current_height_mm,
+    };
+
+    if next_height_mm != *current_height_mm {
+        *current_height_mm = next_height_mm;
+        *current_command = HandsetCommand::Height(*current_height_mm);
+        log_display_command(*current_command);
     }
 }
 
-fn test_command(step: u16) -> HandsetCommand {
-    if step == 0 {
-        return HandsetCommand::Reset;
+fn increase_height(height_mm: u16) -> u16 {
+    if height_mm > MAX_HEIGHT_MM - HEIGHT_STEP_MM {
+        MAX_HEIGHT_MM
+    } else {
+        height_mm + HEIGHT_STEP_MM
     }
-
-    let error_step = step - 1;
-    if error_step < ERROR_STEP_COUNT {
-        return HandsetCommand::Error(match error_step {
-            0 => HandsetError::E01,
-            1 => HandsetError::E02,
-            2 => HandsetError::E03,
-            3 => HandsetError::E04,
-            4 => HandsetError::E05,
-            5 => HandsetError::E06,
-            6 => HandsetError::E07,
-            _ => HandsetError::E08,
-        });
-    }
-
-    let program_step = error_step - ERROR_STEP_COUNT;
-    if program_step < PROGRAM_STEP_COUNT {
-        return HandsetCommand::Program(match program_step {
-            0 => ProgramCommand::Pending,
-            1 => ProgramCommand::Preset1,
-            2 => ProgramCommand::Preset2,
-            3 => ProgramCommand::Preset3,
-            _ => ProgramCommand::Preset4,
-        });
-    }
-
-    let height_step = program_step - PROGRAM_STEP_COUNT + 1;
-    HandsetCommand::Height(height_step * 10)
 }
 
-fn log_test_step(command: HandsetCommand, packet: [u8; 4]) {
+fn decrease_height(height_mm: u16) -> u16 {
+    if height_mm < MIN_HEIGHT_MM + HEIGHT_STEP_MM {
+        MIN_HEIGHT_MM
+    } else {
+        height_mm - HEIGHT_STEP_MM
+    }
+}
+
+fn log_display_command(command: HandsetCommand) {
+    let packet = command.packet();
+
     match command {
         HandsetCommand::Reset => {
             info!(
-                "test reset packet={:02x} {:02x} {:02x} {:02x}",
+                "display reset packet={:02x} {:02x} {:02x} {:02x}",
                 packet[0], packet[1], packet[2], packet[3]
             );
         }
         HandsetCommand::Height(height_mm) => {
             info!(
-                "test height={} packet={:02x} {:02x} {:02x} {:02x}",
+                "display height={} packet={:02x} {:02x} {:02x} {:02x}",
                 height_mm, packet[0], packet[1], packet[2], packet[3]
             );
         }
         HandsetCommand::Error(error) => {
             info!(
-                "test error=E{} packet={:02x} {:02x} {:02x} {:02x}",
+                "display error=E{} packet={:02x} {:02x} {:02x} {:02x}",
                 error.code(),
                 packet[0],
                 packet[1],
@@ -328,7 +443,7 @@ fn log_test_step(command: HandsetCommand, packet: [u8; 4]) {
         }
         HandsetCommand::Program(program) => {
             info!(
-                "test program arg0=0x{:02x} packet={:02x} {:02x} {:02x} {:02x}",
+                "display program arg0=0x{:02x} packet={:02x} {:02x} {:02x} {:02x}",
                 program.arg0(),
                 packet[0],
                 packet[1],
@@ -368,5 +483,40 @@ fn log_button_state(state: HandsetButtonState) {
         HandsetButton::Unknown => {
             info!("button unknown raw_low_mask=0b{:04b}", state.low_mask);
         }
+    }
+}
+
+fn log_save_armed(save_armed: bool) {
+    if save_armed {
+        info!("memory save armed");
+    } else {
+        info!("memory save cancelled");
+    }
+}
+
+fn log_memory_saved(slot: MemorySlot, height_mm: u16) {
+    match slot {
+        MemorySlot::M1 => info!("saved M1 height={}", height_mm),
+        MemorySlot::M2 => info!("saved M2 height={}", height_mm),
+        MemorySlot::M3 => info!("saved M3 height={}", height_mm),
+        MemorySlot::M4 => info!("saved M4 height={}", height_mm),
+    }
+}
+
+fn log_memory_recalled(slot: MemorySlot, height_mm: u16) {
+    match slot {
+        MemorySlot::M1 => info!("recalled M1 height={}", height_mm),
+        MemorySlot::M2 => info!("recalled M2 height={}", height_mm),
+        MemorySlot::M3 => info!("recalled M3 height={}", height_mm),
+        MemorySlot::M4 => info!("recalled M4 height={}", height_mm),
+    }
+}
+
+fn log_memory_empty(slot: MemorySlot) {
+    match slot {
+        MemorySlot::M1 => info!("M1 memory empty"),
+        MemorySlot::M2 => info!("M2 memory empty"),
+        MemorySlot::M3 => info!("M3 memory empty"),
+        MemorySlot::M4 => info!("M4 memory empty"),
     }
 }
