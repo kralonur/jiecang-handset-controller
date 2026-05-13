@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandsetError {
+    H01,
     E01,
     E02,
     E03,
@@ -8,6 +9,8 @@ pub enum HandsetError {
     E06,
     E07,
     E08,
+    E13,
+    LOC,
 }
 
 impl HandsetError {
@@ -21,19 +24,32 @@ impl HandsetError {
             Self::E06 => 0x20,
             Self::E07 => 0x40,
             Self::E08 => 0x80,
+            Self::H01 | Self::E13 | Self::LOC => 0x00,
         }
     }
 
-    pub fn code(self) -> u8 {
+    pub fn arg1(self) -> u8 {
         match self {
-            Self::E01 => 1,
-            Self::E02 => 2,
-            Self::E03 => 3,
-            Self::E04 => 4,
-            Self::E05 => 5,
-            Self::E06 => 6,
-            Self::E07 => 7,
-            Self::E08 => 8,
+            Self::H01 => 0x10,
+            Self::E13 => 0x40,
+            Self::LOC => 0x80,
+            _ => 0x00,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::H01 => "H01",
+            Self::E01 => "E01",
+            Self::E02 => "E02",
+            Self::E03 => "E03",
+            Self::E04 => "E04",
+            Self::E05 => "E05",
+            Self::E06 => "E06",
+            Self::E07 => "E07",
+            Self::E08 => "E08",
+            Self::E13 => "E13",
+            Self::LOC => "LOC",
         }
     }
 }
@@ -75,7 +91,7 @@ impl DisplayCommand {
                 let [hi, lo] = height_mm.to_be_bytes();
                 [0x01, 0x01, hi, lo]
             }
-            Self::Error(error) => [0x01, 0x02, error.arg0(), 0x00],
+            Self::Error(error) => [0x01, 0x02, error.arg0(), error.arg1()],
             Self::Program(program) => [0x01, 0x06, program.arg0(), 0x00],
         }
     }
@@ -121,6 +137,26 @@ mod tests {
                 [0x01, 0x02, arg0, 0x00]
             );
         }
+
+        assert_eq!(
+            DisplayCommand::Error(HandsetError::E13).packet(),
+            [0x01, 0x02, 0x00, 0x40]
+        );
+        assert_eq!(
+            DisplayCommand::Error(HandsetError::H01).packet(),
+            [0x01, 0x02, 0x00, 0x10]
+        );
+        assert_eq!(
+            DisplayCommand::Error(HandsetError::LOC).packet(),
+            [0x01, 0x02, 0x00, 0x80]
+        );
+    }
+
+    #[test]
+    fn error_labels_match_handset_display() {
+        assert_eq!(HandsetError::H01.label(), "H01");
+        assert_eq!(HandsetError::E13.label(), "E13");
+        assert_eq!(HandsetError::LOC.label(), "LOC");
     }
 
     #[test]

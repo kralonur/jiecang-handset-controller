@@ -325,8 +325,8 @@ fn log_display_command(command: DisplayCommand) {
         }
         DisplayCommand::Error(error) => {
             info!(
-                "display error=E{} packet={:02x} {:02x} {:02x} {:02x}",
-                error.code(),
+                "display code={} packet={:02x} {:02x} {:02x} {:02x}",
+                error.label(),
                 packet[0],
                 packet[1],
                 packet[2],

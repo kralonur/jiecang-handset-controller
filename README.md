@@ -148,9 +148,13 @@ These packets are the compact controller-to-handset display messages used by thi
 | `reset()`                           | `[0x01, 0x04, 0x01, 0xaa]` |
 | `height(mm)`                        | `[0x01, 0x01, hi, lo]`     |
 | `error(E01..E08)`                   | `[0x01, 0x02, bit, 0x00]`  |
+| `error(H01)`                        | `[0x01, 0x02, 0x00, 0x10]` |
+| `error(E13)`                        | `[0x01, 0x02, 0x00, 0x40]` |
+| `error(LOC)`                        | `[0x01, 0x02, 0x00, 0x80]` |
 | `program(Pending/Preset1..Preset4)` | `[0x01, 0x06, bit, 0x00]`  |
 
 The command bytes match the Uplift-style controller display messages documented in Jarvis: height `0x01`, error `0x02`, reset `0x04`, and programming `0x06`.
+Hardware probing found second-argument values `0x10` displays `H01`, `0x40` displays `E13`, and `0x80` displays `LOC`.
 
 The ESP demo repeatedly writes these packets over UART at 9600 baud.
 
