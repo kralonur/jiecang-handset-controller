@@ -90,7 +90,7 @@ async fn main(spawner: Spawner) -> ! {
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }
 
-const ERROR_STEP_COUNT: u16 = 4;
+const ERROR_STEP_COUNT: u16 = 8;
 const PROGRAM_STEP_COUNT: u16 = 5;
 const HEIGHT_STEP_COUNT: u16 = 30;
 const TEST_STEP_COUNT: u16 = 1 + ERROR_STEP_COUNT + PROGRAM_STEP_COUNT + HEIGHT_STEP_COUNT;
@@ -140,6 +140,10 @@ impl ProgramCommand {
 
 #[derive(Clone, Copy)]
 enum HandsetError {
+    E01,
+    E02,
+    E03,
+    E04,
     E05,
     E06,
     E07,
@@ -149,6 +153,10 @@ enum HandsetError {
 impl HandsetError {
     fn arg0(self) -> u8 {
         match self {
+            Self::E01 => 0x01,
+            Self::E02 => 0x02,
+            Self::E03 => 0x04,
+            Self::E04 => 0x08,
             Self::E05 => 0x10,
             Self::E06 => 0x20,
             Self::E07 => 0x40,
@@ -158,6 +166,10 @@ impl HandsetError {
 
     fn code(self) -> u8 {
         match self {
+            Self::E01 => 1,
+            Self::E02 => 2,
+            Self::E03 => 3,
+            Self::E04 => 4,
             Self::E05 => 5,
             Self::E06 => 6,
             Self::E07 => 7,
@@ -174,9 +186,13 @@ fn test_command(step: u16) -> HandsetCommand {
     let error_step = step - 1;
     if error_step < ERROR_STEP_COUNT {
         return HandsetCommand::Error(match error_step {
-            0 => HandsetError::E05,
-            1 => HandsetError::E06,
-            2 => HandsetError::E07,
+            0 => HandsetError::E01,
+            1 => HandsetError::E02,
+            2 => HandsetError::E03,
+            3 => HandsetError::E04,
+            4 => HandsetError::E05,
+            5 => HandsetError::E06,
+            6 => HandsetError::E07,
             _ => HandsetError::E08,
         });
     }
