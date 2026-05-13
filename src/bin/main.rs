@@ -64,8 +64,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut test_step = 0u16;
     let mut refresh_count = 0u32;
-    let mut current_packet = test_packet(test_step);
-    log_test_step(test_step, current_packet);
+    let mut current_command = test_command(test_step);
+    let mut current_packet = current_command.packet();
+    log_test_step(current_command, current_packet);
 
     loop {
         let mut written = 0;
@@ -78,8 +79,9 @@ async fn main(spawner: Spawner) -> ! {
         if refresh_count >= 20 {
             refresh_count = 0;
             test_step = (test_step + 1) % TEST_STEP_COUNT;
-            current_packet = test_packet(test_step);
-            log_test_step(test_step, current_packet);
+            current_command = test_command(test_step);
+            current_packet = current_command.packet();
+            log_test_step(current_command, current_packet);
         }
 
         Timer::after(Duration::from_millis(50)).await;
@@ -88,45 +90,100 @@ async fn main(spawner: Spawner) -> ! {
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }
 
-fn height_packet(height_mm: u16) -> [u8; 4] {
-    let [hi, lo] = height_mm.to_be_bytes();
-    [0x01, 0x01, hi, lo]
-}
-
-const ERROR_STEP_COUNT: u16 = 16;
+const ERROR_STEP_COUNT: u16 = 4;
 const HEIGHT_STEP_COUNT: u16 = 30;
 const TEST_STEP_COUNT: u16 = 1 + ERROR_STEP_COUNT + HEIGHT_STEP_COUNT;
 
-fn test_packet(step: u16) -> [u8; 4] {
+#[derive(Clone, Copy)]
+enum HandsetCommand {
+    Reset,
+    Height(u16),
+    Error(HandsetError),
+}
+
+impl HandsetCommand {
+    fn packet(self) -> [u8; 4] {
+        match self {
+            Self::Reset => [0x01, 0x04, 0x01, 0xaa],
+            Self::Height(height_mm) => {
+                let [hi, lo] = height_mm.to_be_bytes();
+                [0x01, 0x01, hi, lo]
+            }
+            Self::Error(error) => [0x01, 0x02, error.arg0(), 0x00],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HandsetError {
+    E05,
+    E06,
+    E07,
+    E08,
+}
+
+impl HandsetError {
+    fn arg0(self) -> u8 {
+        match self {
+            Self::E05 => 0x10,
+            Self::E06 => 0x20,
+            Self::E07 => 0x40,
+            Self::E08 => 0x80,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::E05 => 5,
+            Self::E06 => 6,
+            Self::E07 => 7,
+            Self::E08 => 8,
+        }
+    }
+}
+
+fn test_command(step: u16) -> HandsetCommand {
     if step == 0 {
-        return [0x01, 0x04, 0x01, 0xaa];
+        return HandsetCommand::Reset;
     }
 
     let error_step = step - 1;
     if error_step < ERROR_STEP_COUNT {
-        return [0x01, 0x02, (error_step as u8) << 4, 0x00];
+        return HandsetCommand::Error(match error_step {
+            0 => HandsetError::E05,
+            1 => HandsetError::E06,
+            2 => HandsetError::E07,
+            _ => HandsetError::E08,
+        });
     }
 
     let height_step = error_step - ERROR_STEP_COUNT + 1;
-    height_packet(height_step * 10)
+    HandsetCommand::Height(height_step * 10)
 }
 
-fn log_test_step(step: u16, packet: [u8; 4]) {
-    if step == 0 {
-        info!(
-            "test reset packet={:02x} {:02x} {:02x} {:02x}",
-            packet[0], packet[1], packet[2], packet[3]
-        );
-    } else if step <= ERROR_STEP_COUNT {
-        info!(
-            "test error arg0=0x{:02x} packet={:02x} {:02x} {:02x} {:02x}",
-            packet[2], packet[0], packet[1], packet[2], packet[3]
-        );
-    } else {
-        let height = (step - ERROR_STEP_COUNT) * 10;
-        info!(
-            "test height={} packet={:02x} {:02x} {:02x} {:02x}",
-            height, packet[0], packet[1], packet[2], packet[3]
-        );
+fn log_test_step(command: HandsetCommand, packet: [u8; 4]) {
+    match command {
+        HandsetCommand::Reset => {
+            info!(
+                "test reset packet={:02x} {:02x} {:02x} {:02x}",
+                packet[0], packet[1], packet[2], packet[3]
+            );
+        }
+        HandsetCommand::Height(height_mm) => {
+            info!(
+                "test height={} packet={:02x} {:02x} {:02x} {:02x}",
+                height_mm, packet[0], packet[1], packet[2], packet[3]
+            );
+        }
+        HandsetCommand::Error(error) => {
+            info!(
+                "test error=E{} packet={:02x} {:02x} {:02x} {:02x}",
+                error.code(),
+                packet[0],
+                packet[1],
+                packet[2],
+                packet[3]
+            );
+        }
     }
 }
