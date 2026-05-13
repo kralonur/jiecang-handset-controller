@@ -12,6 +12,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartTx};
 use esp_println as _;
@@ -58,9 +59,26 @@ async fn main(spawner: Spawner) -> ! {
     // TODO: Spawn some tasks
     let _ = spawner;
 
-    let mut handset_tx = UartTx::new(peripherals.UART1, UartConfig::default().with_baudrate(9_600))
-        .expect("failed to configure UART1")
-        .with_tx(peripherals.GPIO16);
+    let button_input_config = InputConfig::default().with_pull(Pull::Up);
+    let handset_pin2 = Input::new(peripherals.GPIO2, button_input_config);
+    let handset_pin3 = Input::new(peripherals.GPIO3, button_input_config);
+    let handset_pin4 = Input::new(peripherals.GPIO4, button_input_config);
+    let handset_pin5 = Input::new(peripherals.GPIO5, button_input_config);
+    let button_inputs = HandsetButtonInputs {
+        pin2: handset_pin2,
+        pin3: handset_pin3,
+        pin4: handset_pin4,
+        pin5: handset_pin5,
+    };
+    let mut previous_button_state = button_inputs.read();
+    log_button_state(previous_button_state);
+
+    let mut handset_tx = UartTx::new(
+        peripherals.UART1,
+        UartConfig::default().with_baudrate(9_600),
+    )
+    .expect("failed to configure UART1")
+    .with_tx(peripherals.GPIO16);
 
     let mut test_step = 0u16;
     let mut refresh_count = 0u32;
@@ -74,6 +92,12 @@ async fn main(spawner: Spawner) -> ! {
             written += handset_tx.write(&current_packet[written..]).unwrap_or(0);
         }
         handset_tx.flush().ok();
+
+        let button_state = button_inputs.read();
+        if button_state != previous_button_state {
+            log_button_state(button_state);
+            previous_button_state = button_state;
+        }
 
         refresh_count += 1;
         if refresh_count >= 20 {
@@ -94,6 +118,72 @@ const ERROR_STEP_COUNT: u16 = 8;
 const PROGRAM_STEP_COUNT: u16 = 5;
 const HEIGHT_STEP_COUNT: u16 = 30;
 const TEST_STEP_COUNT: u16 = 1 + ERROR_STEP_COUNT + PROGRAM_STEP_COUNT + HEIGHT_STEP_COUNT;
+
+struct HandsetButtonInputs<'d> {
+    pin2: Input<'d>,
+    pin3: Input<'d>,
+    pin4: Input<'d>,
+    pin5: Input<'d>,
+}
+
+impl HandsetButtonInputs<'_> {
+    fn read(&self) -> HandsetButtonState {
+        let mut low_mask = 0u8;
+
+        if self.pin2.is_low() {
+            low_mask |= 0b0001;
+        }
+        if self.pin3.is_low() {
+            low_mask |= 0b0010;
+        }
+        if self.pin4.is_low() {
+            low_mask |= 0b0100;
+        }
+        if self.pin5.is_low() {
+            low_mask |= 0b1000;
+        }
+
+        HandsetButtonState {
+            low_mask,
+            button: HandsetButton::decode(low_mask),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HandsetButtonState {
+    low_mask: u8,
+    button: HandsetButton,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HandsetButton {
+    None,
+    Up,
+    Down,
+    M1,
+    M2,
+    M3,
+    M4,
+    Rec,
+    Unknown,
+}
+
+impl HandsetButton {
+    fn decode(low_mask: u8) -> Self {
+        match low_mask {
+            0b0000 => Self::None,
+            0b1000 => Self::Up,
+            0b0100 => Self::Down,
+            0b1100 => Self::M1,
+            0b0010 => Self::M2,
+            0b0110 => Self::M3,
+            0b1010 => Self::M4,
+            0b0001 => Self::Rec,
+            _ => Self::Unknown,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum HandsetCommand {
@@ -245,6 +335,38 @@ fn log_test_step(command: HandsetCommand, packet: [u8; 4]) {
                 packet[2],
                 packet[3]
             );
+        }
+    }
+}
+
+fn log_button_state(state: HandsetButtonState) {
+    match state.button {
+        HandsetButton::None => {
+            info!("buttons none raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::Up => {
+            info!("button UP raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::Down => {
+            info!("button DOWN raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::M1 => {
+            info!("button M1 raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::M2 => {
+            info!("button M2 raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::M3 => {
+            info!("button M3 raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::M4 => {
+            info!("button M4 raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::Rec => {
+            info!("button REC raw_low_mask=0b{:04b}", state.low_mask);
+        }
+        HandsetButton::Unknown => {
+            info!("button unknown raw_low_mask=0b{:04b}", state.low_mask);
         }
     }
 }
