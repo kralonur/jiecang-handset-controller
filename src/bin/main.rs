@@ -91,14 +91,16 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 const ERROR_STEP_COUNT: u16 = 4;
+const PROGRAM_STEP_COUNT: u16 = 5;
 const HEIGHT_STEP_COUNT: u16 = 30;
-const TEST_STEP_COUNT: u16 = 1 + ERROR_STEP_COUNT + HEIGHT_STEP_COUNT;
+const TEST_STEP_COUNT: u16 = 1 + ERROR_STEP_COUNT + PROGRAM_STEP_COUNT + HEIGHT_STEP_COUNT;
 
 #[derive(Clone, Copy)]
 enum HandsetCommand {
     Reset,
     Height(u16),
     Error(HandsetError),
+    Program(ProgramCommand),
 }
 
 impl HandsetCommand {
@@ -110,6 +112,28 @@ impl HandsetCommand {
                 [0x01, 0x01, hi, lo]
             }
             Self::Error(error) => [0x01, 0x02, error.arg0(), 0x00],
+            Self::Program(program) => [0x01, 0x06, program.arg0(), 0x00],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProgramCommand {
+    Pending,
+    Preset1,
+    Preset2,
+    Preset3,
+    Preset4,
+}
+
+impl ProgramCommand {
+    fn arg0(self) -> u8 {
+        match self {
+            Self::Pending => 0x00, // 01 06 00 00
+            Self::Preset1 => 0x01, // 01 06 01 00
+            Self::Preset2 => 0x02, // 01 06 02 00
+            Self::Preset3 => 0x04, // 01 06 04 00
+            Self::Preset4 => 0x08, // 01 06 08 00
         }
     }
 }
@@ -157,7 +181,18 @@ fn test_command(step: u16) -> HandsetCommand {
         });
     }
 
-    let height_step = error_step - ERROR_STEP_COUNT + 1;
+    let program_step = error_step - ERROR_STEP_COUNT;
+    if program_step < PROGRAM_STEP_COUNT {
+        return HandsetCommand::Program(match program_step {
+            0 => ProgramCommand::Pending,
+            1 => ProgramCommand::Preset1,
+            2 => ProgramCommand::Preset2,
+            3 => ProgramCommand::Preset3,
+            _ => ProgramCommand::Preset4,
+        });
+    }
+
+    let height_step = program_step - PROGRAM_STEP_COUNT + 1;
     HandsetCommand::Height(height_step * 10)
 }
 
@@ -179,6 +214,16 @@ fn log_test_step(command: HandsetCommand, packet: [u8; 4]) {
             info!(
                 "test error=E{} packet={:02x} {:02x} {:02x} {:02x}",
                 error.code(),
+                packet[0],
+                packet[1],
+                packet[2],
+                packet[3]
+            );
+        }
+        HandsetCommand::Program(program) => {
+            info!(
+                "test program arg0=0x{:02x} packet={:02x} {:02x} {:02x} {:02x}",
+                program.arg0(),
                 packet[0],
                 packet[1],
                 packet[2],
