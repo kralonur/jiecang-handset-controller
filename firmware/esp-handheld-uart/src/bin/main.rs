@@ -16,7 +16,7 @@ use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartTx};
 use esp_println as _;
-use handset_controller::{
+use jiecang_handset_controller::{
     Button, ButtonEvent, ButtonLines, ButtonReading, Controller, DisplayCommand, HandsetError,
     ProgramCommand,
 };

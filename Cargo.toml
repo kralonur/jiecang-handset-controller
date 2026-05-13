@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "crates/handset-controller",
+  "crates/jiecang-handset-controller",
   "firmware/esp-handheld-uart",
 ]
 resolver = "3"
